@@ -1,0 +1,22 @@
+server:
+  port: 9090
+  servlet:
+    context-path: /smart-basket/api/v1
+
+spring:
+  application:
+    name: smart-basket-backend
+  data:
+    mongodb:
+#      uri: mongodb://localhost:27017/smartbasket
+      uri: mongodb+srv://Khalid:SBkks996@cluster0.zobe0pv.mongodb.net/Smart-Basket?retryWrites=true&w=majority
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+logging:
+  level:
+    org.springframework.data.mongodb.core.MongoTemplate: DEBUG
