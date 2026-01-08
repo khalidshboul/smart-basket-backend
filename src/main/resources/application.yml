@@ -1,5 +1,5 @@
 server:
-  port: 9090
+  port: ${SERVER_PORT:8080}
   servlet:
     context-path: /smart-basket/api/v1
 
@@ -8,8 +8,9 @@ spring:
     name: smart-basket-backend
   data:
     mongodb:
-#      uri: mongodb://localhost:27017/smartbasket
-      uri: mongodb+srv://Khalid:SBkks996@cluster0.zobe0pv.mongodb.net/Smart-Basket?retryWrites=true&w=majority
+      # MongoDB URI from environment variable (required in production)
+      # Example: mongodb+srv://user:password@cluster.mongodb.net/database?retryWrites=true&w=majority
+      uri: ${MONGODB_URI:mongodb://localhost:27017/smartbasket}
 
 management:
   endpoints:
@@ -19,4 +20,5 @@ management:
 
 logging:
   level:
-    org.springframework.data.mongodb.core.MongoTemplate: DEBUG
+    org.springframework.data.mongodb.core.MongoTemplate: ${LOG_LEVEL_MONGODB:INFO}
+    root: ${LOG_LEVEL_ROOT:INFO}
