@@ -14,7 +14,6 @@ import java.util.List;
 @RestController
 @RequestMapping("/items")
 @RequiredArgsConstructor
-@CrossOrigin(origins = "*")
 public class ReferenceItemController {
 
     private final ReferenceItemService referenceItemService;

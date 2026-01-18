@@ -18,7 +18,6 @@ import java.util.List;
 @RestController
 @RequestMapping("/prices")
 @RequiredArgsConstructor
-@CrossOrigin(origins = "*")
 public class PriceController {
 
     private final PriceUpdateService priceUpdateService;
