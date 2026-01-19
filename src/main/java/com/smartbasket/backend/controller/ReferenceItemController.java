@@ -32,7 +32,12 @@ public class ReferenceItemController {
     }
 
     @GetMapping("/category/{categoryId}")
-    public ResponseEntity<List<ReferenceItemDto>> getItemsByCategory(@PathVariable String categoryId) {
+    public ResponseEntity<List<ReferenceItemDto>> getItemsByCategory(
+            @PathVariable String categoryId,
+            @RequestParam(defaultValue = "false") boolean includeSubcategories) {
+        if (includeSubcategories) {
+            return ResponseEntity.ok(referenceItemService.getItemsByCategoryIncludingSubcategories(categoryId));
+        }
         return ResponseEntity.ok(referenceItemService.getItemsByCategory(categoryId));
     }
 

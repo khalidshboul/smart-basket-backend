@@ -8,6 +8,9 @@ import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @Data
 @Builder
 @NoArgsConstructor
@@ -30,6 +33,15 @@ public class Category {
     
     @Builder.Default
     private boolean active = false;
+    
+    // Parent category reference for hierarchical structure
+    // null = top-level category, otherwise = subcategory
+    private String parentCategoryId;
+    
+    // List of child category IDs for bidirectional navigation
+    // Synchronized when children are added/removed
+    @Builder.Default
+    private List<String> subcategoryIds = new ArrayList<>();
 }
 
 

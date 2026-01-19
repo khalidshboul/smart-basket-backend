@@ -29,9 +29,44 @@ public class CategoryController {
         return ResponseEntity.ok(categoryService.getActiveCategories());
     }
 
+    /**
+     * Get only top-level categories (no parent)
+     */
+    @GetMapping("/top-level")
+    public ResponseEntity<List<CategoryDto>> getTopLevelCategories(
+            @RequestParam(defaultValue = "false") boolean activeOnly) {
+        if (activeOnly) {
+            return ResponseEntity.ok(categoryService.getActiveTopLevelCategories());
+        }
+        return ResponseEntity.ok(categoryService.getTopLevelCategories());
+    }
+
     @GetMapping("/{id}")
     public ResponseEntity<CategoryDto> getCategoryById(@PathVariable String id) {
         return categoryService.getCategoryById(id)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
+    }
+
+    /**
+     * Get subcategories of a parent category
+     */
+    @GetMapping("/{id}/subcategories")
+    public ResponseEntity<List<CategoryDto>> getSubcategories(
+            @PathVariable String id,
+            @RequestParam(defaultValue = "false") boolean activeOnly) {
+        if (activeOnly) {
+            return ResponseEntity.ok(categoryService.getActiveSubcategories(id));
+        }
+        return ResponseEntity.ok(categoryService.getSubcategories(id));
+    }
+
+    /**
+     * Get category with its subcategories populated
+     */
+    @GetMapping("/{id}/with-subcategories")
+    public ResponseEntity<CategoryDto> getCategoryWithSubcategories(@PathVariable String id) {
+        return categoryService.getCategoryWithSubcategories(id)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
     }
