@@ -11,5 +11,8 @@ public interface ReferenceItemRepository extends MongoRepository<ReferenceItem, 
     List<ReferenceItem> findByCategory(String category);
     List<ReferenceItem> findByCategoryId(String categoryId);
     List<ReferenceItem> findByNameContainingIgnoreCase(String name);
+    
+    // Query items across multiple categories (parent + subcategories)
+    List<ReferenceItem> findByCategoryIdIn(List<String> categoryIds);
 }
 

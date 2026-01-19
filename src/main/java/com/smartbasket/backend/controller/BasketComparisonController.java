@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.*;
 
 @RestController
 @RequestMapping("/basket")
+@CrossOrigin(origins = "*")
 @RequiredArgsConstructor
 public class BasketComparisonController {
 

@@ -17,6 +17,7 @@ public class ReferenceItemDto {
     private String nameAr;
     private String categoryId;
     private String category; // Denormalized category name
+    private String categoryBreadcrumb; // Full path e.g., "Dairy > Milk"
     private String description;
     private String descriptionAr;
     private List<String> images;
