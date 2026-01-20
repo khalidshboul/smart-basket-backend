@@ -48,6 +48,30 @@ public class ReferenceItemService {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * Get items by category ID including items from all subcategories
+     */
+    public List<ReferenceItemDto> getItemsByCategoryIncludingSubcategories(String categoryId) {
+        // Validate category exists
+        if (!categoryRepository.existsById(categoryId)) {
+            throw new ResourceNotFoundException("Category not found: " + categoryId);
+        }
+        
+        // Collect category IDs (parent + all subcategories)
+        List<String> categoryIds = new ArrayList<>();
+        categoryIds.add(categoryId);
+        
+        // Get subcategory IDs
+        List<Category> subcategories = categoryRepository.findByParentCategoryIdOrderByDisplayOrderAsc(categoryId);
+        subcategories.forEach(sub -> categoryIds.add(sub.getId()));
+        
+        // Query items in all these categories
+        return referenceItemRepository.findByCategoryIdIn(categoryIds)
+                .stream()
+                .map(referenceItemMapper::toDto)
+                .collect(Collectors.toList());
+    }
+
     public List<ReferenceItemDto> searchItems(String query) {
         return referenceItemRepository.findByNameContainingIgnoreCase(query)
                 .stream()

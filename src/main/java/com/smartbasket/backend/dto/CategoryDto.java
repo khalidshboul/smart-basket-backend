@@ -5,6 +5,8 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.List;
+
 @Data
 @Builder
 @NoArgsConstructor
@@ -18,6 +20,13 @@ public class CategoryDto {
     private String descriptionAr;
     private int displayOrder;
     private boolean active;
+    
+    // Hierarchy fields
+    private String parentCategoryId;
+    private String parentCategoryName;
+    private List<CategoryDto> subcategories;
+    private int subcategoryCount;
+    private List<String> subcategoryIds; // NEW: Direct list of child IDs
 }
 
 

@@ -20,6 +20,9 @@ public class CreateCategoryRequest {
     private String descriptionAr;
     private Integer displayOrder;
     private Boolean active;
+    
+    // Optional: null for top-level categories, set to create as subcategory
+    private String parentCategoryId;
 }
 
 
