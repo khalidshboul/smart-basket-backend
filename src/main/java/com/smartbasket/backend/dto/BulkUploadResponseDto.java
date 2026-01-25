@@ -13,37 +13,35 @@ import java.util.List;
 @NoArgsConstructor
 @AllArgsConstructor
 public class BulkUploadResponseDto {
-    private int totalSheets;
+    private boolean success;
     private int totalRows;
     private int successCount;
     private int errorCount;
+    private String categoryId;
+    private String categoryName;
     
     @Builder.Default
-    private List<SheetResult> sheetResults = new ArrayList<>();
+    private List<String> invalidStores = new ArrayList<>();
     
     @Builder.Default
-    private List<UploadError> errors = new ArrayList<>();
+    private List<RowError> errors = new ArrayList<>();
     
     @Data
     @Builder
     @NoArgsConstructor
     @AllArgsConstructor
-    public static class SheetResult {
-        private String sheetName;
-        private String storeName;
-        private int rowsProcessed;
-        private int successCount;
-        private int errorCount;
-    }
-    
-    @Data
-    @Builder
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class UploadError {
-        private String sheetName;
-        private int rowNumber;
+    public static class RowError {
+        private int row;
         private String itemName;
-        private String errorMessage;
+        private String errorType;  // VALIDATION, DUPLICATE, PRICE, STORE, SYSTEM
+        private String field;      // nullable - specific field that failed
+        private String message;
     }
+    
+    // Error type constants
+    public static final String ERROR_VALIDATION = "VALIDATION";
+    public static final String ERROR_DUPLICATE = "DUPLICATE";
+    public static final String ERROR_PRICE = "PRICE";
+    public static final String ERROR_STORE = "STORE";
+    public static final String ERROR_SYSTEM = "SYSTEM";
 }
