@@ -1,8 +1,9 @@
 package com.smartbasket.backend.service;
 
 import com.smartbasket.backend.dto.BulkUploadResponseDto;
-import com.smartbasket.backend.dto.BulkUploadResponseDto.SheetResult;
-import com.smartbasket.backend.dto.BulkUploadResponseDto.UploadError;
+import com.smartbasket.backend.dto.BulkUploadResponseDto.RowError;
+import com.smartbasket.backend.exception.BulkUploadValidationException;
+import com.smartbasket.backend.exception.ResourceNotFoundException;
 import com.smartbasket.backend.model.Category;
 import com.smartbasket.backend.model.ReferenceItem;
 import com.smartbasket.backend.model.Store;
@@ -21,9 +22,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 
 @Service
 @RequiredArgsConstructor
@@ -35,153 +34,229 @@ public class BulkUploadService {
     private final ReferenceItemRepository referenceItemRepository;
     private final StoreItemRepository storeItemRepository;
     
-    // Column indices (0-based)
+    // Fixed column indices (0-based)
     private static final int COL_NAME = 0;
     private static final int COL_NAME_AR = 1;
-    private static final int COL_CATEGORY = 2;
-    private static final int COL_ORIGINAL_PRICE = 3;
-    private static final int COL_DISCOUNT_PRICE = 4;
-    private static final int COL_DESCRIPTION = 5;
-    private static final int COL_DESCRIPTION_AR = 6;
-    private static final int COL_IMAGE1 = 7;
-    private static final int COL_IMAGE2 = 8;
-    private static final int COL_IMAGE3 = 9;
+    private static final int COL_DESCRIPTION = 2;
+    private static final int COL_DESCRIPTION_AR = 3;
+    private static final int COL_IMAGE1 = 4;
+    private static final int COL_IMAGE2 = 5;
+    private static final int COL_IMAGE3 = 6;
+    private static final int FIRST_STORE_COL = 7;
     
-    @Transactional
-    public BulkUploadResponseDto processExcelFile(MultipartFile file) throws IOException {
-        List<SheetResult> sheetResults = new ArrayList<>();
-        List<UploadError> errors = new ArrayList<>();
-        int totalRows = 0;
-        int totalSuccess = 0;
-        int totalErrors = 0;
+    /**
+     * Internal DTO to hold parsed row data before validation
+     */
+    private record ParsedRow(
+            int rowNumber,
+            String name,
+            String nameAr,
+            String description,
+            String descriptionAr,
+            List<String> images,
+            Map<String, Double> storePrices // storeId -> originalPrice
+    ) {}
+    
+    @Transactional(rollbackFor = Exception.class)
+    public BulkUploadResponseDto processExcelFile(MultipartFile file, String categoryId) throws IOException {
+        // Phase 1: Validate category exists
+        Category category = categoryRepository.findById(categoryId)
+                .orElseThrow(() -> new ResourceNotFoundException("Category not found: " + categoryId));
         
         try (Workbook workbook = new XSSFWorkbook(file.getInputStream())) {
-            int numberOfSheets = workbook.getNumberOfSheets();
+            Sheet sheet = workbook.getSheetAt(0);
             
-            for (int i = 0; i < numberOfSheets; i++) {
-                Sheet sheet = workbook.getSheetAt(i);
-                String sheetName = sheet.getSheetName();
-                
-                // Lookup store by sheet name (EN or AR)
-                Optional<Store> storeOpt = findStoreByName(sheetName);
-                if (storeOpt.isEmpty()) {
-                    errors.add(UploadError.builder()
-                            .sheetName(sheetName)
-                            .rowNumber(0)
-                            .errorMessage("Store not found with name: " + sheetName)
-                            .build());
-                    sheetResults.add(SheetResult.builder()
-                            .sheetName(sheetName)
-                            .rowsProcessed(0)
-                            .successCount(0)
-                            .errorCount(1)
-                            .build());
-                    totalErrors++;
+            // Phase 2: Parse header row and validate stores
+            Row headerRow = sheet.getRow(0);
+            if (headerRow == null) {
+                throw new BulkUploadValidationException(
+                        0, categoryId, category.getName(),
+                        List.of(RowError.builder()
+                                .row(1)
+                                .errorType(BulkUploadResponseDto.ERROR_VALIDATION)
+                                .message("Excel file is empty or missing header row")
+                                .build())
+                );
+            }
+            
+            // Extract store names from header (columns 7+)
+            Map<Integer, Store> storeColumns = new LinkedHashMap<>();
+            List<String> invalidStores = new ArrayList<>();
+            List<RowError> errors = new ArrayList<>();
+            
+            for (int col = FIRST_STORE_COL; col < headerRow.getLastCellNum(); col++) {
+                Cell cell = headerRow.getCell(col);
+                String storeName = getStringCellValue(cell);
+                if (storeName != null && !storeName.isBlank()) {
+                    Optional<Store> storeOpt = findStoreByName(storeName);
+                    if (storeOpt.isPresent()) {
+                        storeColumns.put(col, storeOpt.get());
+                    } else {
+                        invalidStores.add(storeName);
+                        errors.add(RowError.builder()
+                                .row(1)
+                                .errorType(BulkUploadResponseDto.ERROR_STORE)
+                                .field(storeName)
+                                .message("Store not found: " + storeName)
+                                .build());
+                    }
+                }
+            }
+            
+            // Fail if any stores are invalid
+            if (!invalidStores.isEmpty()) {
+                throw new BulkUploadValidationException(0, categoryId, category.getName(), errors, invalidStores);
+            }
+            
+            if (storeColumns.isEmpty()) {
+                throw new BulkUploadValidationException(
+                        0, categoryId, category.getName(),
+                        List.of(RowError.builder()
+                                .row(1)
+                                .errorType(BulkUploadResponseDto.ERROR_VALIDATION)
+                                .message("No valid store columns found in header row (columns H onwards)")
+                                .build())
+                );
+            }
+            
+            // Phase 3: Parse and validate all rows
+            List<ParsedRow> parsedRows = new ArrayList<>();
+            int totalRows = 0;
+            
+            for (int rowNum = 1; rowNum <= sheet.getLastRowNum(); rowNum++) {
+                Row row = sheet.getRow(rowNum);
+                if (row == null || isRowEmpty(row)) {
                     continue;
                 }
                 
-                Store store = storeOpt.get();
-                SheetResult sheetResult = processSheet(sheet, store, errors);
-                sheetResults.add(sheetResult);
+                totalRows++;
+                int excelRowNum = rowNum + 1; // 1-indexed for user display
                 
-                totalRows += sheetResult.getRowsProcessed();
-                totalSuccess += sheetResult.getSuccessCount();
-                totalErrors += sheetResult.getErrorCount();
-            }
-        }
-        
-        return BulkUploadResponseDto.builder()
-                .totalSheets(sheetResults.size())
-                .totalRows(totalRows)
-                .successCount(totalSuccess)
-                .errorCount(totalErrors)
-                .sheetResults(sheetResults)
-                .errors(errors)
-                .build();
-    }
-    
-    private SheetResult processSheet(Sheet sheet, Store store, List<UploadError> errors) {
-        String sheetName = sheet.getSheetName();
-        int rowsProcessed = 0;
-        int successCount = 0;
-        int errorCount = 0;
-        
-        // Skip header row, start from row 1
-        for (int rowNum = 1; rowNum <= sheet.getLastRowNum(); rowNum++) {
-            Row row = sheet.getRow(rowNum);
-            if (row == null || isRowEmpty(row)) {
-                continue;
+                // Parse row data
+                String name = getStringCellValue(row.getCell(COL_NAME));
+                String nameAr = getStringCellValue(row.getCell(COL_NAME_AR));
+                String description = getStringCellValue(row.getCell(COL_DESCRIPTION));
+                String descriptionAr = getStringCellValue(row.getCell(COL_DESCRIPTION_AR));
+                String image1 = getStringCellValue(row.getCell(COL_IMAGE1));
+                String image2 = getStringCellValue(row.getCell(COL_IMAGE2));
+                String image3 = getStringCellValue(row.getCell(COL_IMAGE3));
+                
+                // Validate required fields
+                if (name == null || name.isBlank()) {
+                    errors.add(RowError.builder()
+                            .row(excelRowNum)
+                            .itemName(name)
+                            .errorType(BulkUploadResponseDto.ERROR_VALIDATION)
+                            .field("name")
+                            .message("Item name is required")
+                            .build());
+                    continue;
+                }
+                
+                // Build images list
+                List<String> images = new ArrayList<>();
+                if (image1 != null && !image1.isBlank()) images.add(image1);
+                if (image2 != null && !image2.isBlank()) images.add(image2);
+                if (image3 != null && !image3.isBlank()) images.add(image3);
+                
+                // Parse store prices
+                Map<String, Double> storePrices = new HashMap<>();
+                boolean hasPriceError = false;
+                
+                for (Map.Entry<Integer, Store> entry : storeColumns.entrySet()) {
+                    Cell priceCell = row.getCell(entry.getKey());
+                    String rawValue = getStringCellValue(priceCell);
+                    
+                    if (rawValue != null && !rawValue.isBlank()) {
+                        Double price = getNumericCellValue(priceCell);
+                        if (price == null) {
+                            errors.add(RowError.builder()
+                                    .row(excelRowNum)
+                                    .itemName(name)
+                                    .errorType(BulkUploadResponseDto.ERROR_PRICE)
+                                    .field(entry.getValue().getName())
+                                    .message("Invalid price value: '" + rawValue + "'")
+                                    .build());
+                            hasPriceError = true;
+                        } else if (price > 0) {
+                            storePrices.put(entry.getValue().getId(), price);
+                        }
+                    }
+                }
+                
+                if (hasPriceError) {
+                    continue;
+                }
+                
+                // At least one store price is required
+                if (storePrices.isEmpty()) {
+                    errors.add(RowError.builder()
+                            .row(excelRowNum)
+                            .itemName(name)
+                            .errorType(BulkUploadResponseDto.ERROR_VALIDATION)
+                            .message("At least one store price is required")
+                            .build());
+                    continue;
+                }
+                
+                parsedRows.add(new ParsedRow(excelRowNum, name, nameAr, description, descriptionAr, images, storePrices));
             }
             
-            rowsProcessed++;
+            // Phase 4: Fail if any validation errors
+            if (!errors.isEmpty()) {
+                throw new BulkUploadValidationException(totalRows, categoryId, category.getName(), errors);
+            }
             
-            try {
-                processRow(row, store, sheetName, errors);
+            if (parsedRows.isEmpty()) {
+                throw new BulkUploadValidationException(
+                        0, categoryId, category.getName(),
+                        List.of(RowError.builder()
+                                .row(0)
+                                .errorType(BulkUploadResponseDto.ERROR_VALIDATION)
+                                .message("No valid data rows found in the Excel file")
+                                .build())
+                );
+            }
+            
+            // Phase 5: Write all data (inside transaction)
+            int successCount = 0;
+            
+            for (ParsedRow parsedRow : parsedRows) {
+                // Create or update ReferenceItem
+                ReferenceItem referenceItem = createOrUpdateReferenceItem(
+                        parsedRow.name(),
+                        parsedRow.nameAr(),
+                        category,
+                        parsedRow.description(),
+                        parsedRow.descriptionAr(),
+                        parsedRow.images(),
+                        new ArrayList<>(parsedRow.storePrices().keySet())
+                );
+                
+                // Create StoreItems for each store price
+                for (Map.Entry<String, Double> priceEntry : parsedRow.storePrices().entrySet()) {
+                    createOrUpdateStoreItem(referenceItem, priceEntry.getKey(), priceEntry.getValue());
+                }
+                
                 successCount++;
-            } catch (Exception e) {
-                errorCount++;
-                String itemName = getStringCellValue(row.getCell(COL_NAME));
-                errors.add(UploadError.builder()
-                        .sheetName(sheetName)
-                        .rowNumber(rowNum + 1)
-                        .itemName(itemName)
-                        .errorMessage(e.getMessage())
-                        .build());
-                log.error("Error processing row {} in sheet {}: {}", rowNum + 1, sheetName, e.getMessage());
             }
+            
+            log.info("Bulk upload completed: {} items processed for category '{}'", successCount, category.getName());
+            
+            return BulkUploadResponseDto.builder()
+                    .success(true)
+                    .totalRows(totalRows)
+                    .successCount(successCount)
+                    .errorCount(0)
+                    .categoryId(categoryId)
+                    .categoryName(category.getName())
+                    .build();
         }
-        
-        return SheetResult.builder()
-                .sheetName(sheetName)
-                .storeName(store.getName())
-                .rowsProcessed(rowsProcessed)
-                .successCount(successCount)
-                .errorCount(errorCount)
-                .build();
     }
     
-    private void processRow(Row row, Store store, String sheetName, List<UploadError> errors) {
-        // Extract values
-        String name = getStringCellValue(row.getCell(COL_NAME));
-        String nameAr = getStringCellValue(row.getCell(COL_NAME_AR));
-        String categoryName = getStringCellValue(row.getCell(COL_CATEGORY));
-        Double originalPrice = getNumericCellValue(row.getCell(COL_ORIGINAL_PRICE));
-        Double discountPrice = getNumericCellValue(row.getCell(COL_DISCOUNT_PRICE));
-        String description = getStringCellValue(row.getCell(COL_DESCRIPTION));
-        String descriptionAr = getStringCellValue(row.getCell(COL_DESCRIPTION_AR));
-        String image1 = getStringCellValue(row.getCell(COL_IMAGE1));
-        String image2 = getStringCellValue(row.getCell(COL_IMAGE2));
-        String image3 = getStringCellValue(row.getCell(COL_IMAGE3));
-        
-        // Validate required fields
-        if (name == null || name.isBlank()) {
-            throw new IllegalArgumentException("Item name is required");
-        }
-        if (categoryName == null || categoryName.isBlank()) {
-            throw new IllegalArgumentException("Category is required");
-        }
-        
-        // Lookup or create category by path (supports "Parent.Child.Grandchild" format)
-        Category category = findOrCreateCategoryByPath(categoryName);
-        
-        // Build images list
-        List<String> images = new ArrayList<>();
-        if (image1 != null && !image1.isBlank()) images.add(image1);
-        if (image2 != null && !image2.isBlank()) images.add(image2);
-        if (image3 != null && !image3.isBlank()) images.add(image3);
-        
-        // Find or create ReferenceItem and link it to the store
-        ReferenceItem referenceItem = findOrCreateReferenceItem(
-                name, nameAr, category, description, descriptionAr, images, store
-        );
-        
-        // Create or update StoreItem with prices
-        createOrUpdateStoreItem(referenceItem, store, originalPrice, discountPrice);
-    }
-    
-    private ReferenceItem findOrCreateReferenceItem(
+    private ReferenceItem createOrUpdateReferenceItem(
             String name, String nameAr, Category category,
-            String description, String descriptionAr, List<String> images, Store store
+            String description, String descriptionAr, List<String> images, List<String> storeIds
     ) {
         // Check if item already exists by name
         Optional<ReferenceItem> existingItem = referenceItemRepository.findByNameIgnoreCase(name);
@@ -201,22 +276,21 @@ public class BulkUploadService {
             if ((item.getImages() == null || item.getImages().isEmpty()) && !images.isEmpty()) {
                 item.setImages(images);
             }
-            // Add store to specificStoreIds if not already present
-            List<String> storeIds = item.getSpecificStoreIds();
-            if (storeIds == null) {
-                storeIds = new ArrayList<>();
+            // Add stores to specificStoreIds if not already present
+            List<String> currentStoreIds = item.getSpecificStoreIds();
+            if (currentStoreIds == null) {
+                currentStoreIds = new ArrayList<>();
             }
-            if (!storeIds.contains(store.getId())) {
-                storeIds.add(store.getId());
-                item.setSpecificStoreIds(storeIds);
+            for (String storeId : storeIds) {
+                if (!currentStoreIds.contains(storeId)) {
+                    currentStoreIds.add(storeId);
+                }
             }
+            item.setSpecificStoreIds(currentStoreIds);
             return referenceItemRepository.save(item);
         }
         
-        // Create new reference item with store in specificStoreIds
-        List<String> storeIds = new ArrayList<>();
-        storeIds.add(store.getId());
-        
+        // Create new reference item
         ReferenceItem newItem = ReferenceItem.builder()
                 .name(name)
                 .nameAr(nameAr)
@@ -233,33 +307,23 @@ public class BulkUploadService {
         return referenceItemRepository.save(newItem);
     }
     
-    private void createOrUpdateStoreItem(ReferenceItem referenceItem, Store store,
-                                         Double originalPrice, Double discountPrice) {
-        // Check if StoreItem already exists for this store-item combination
+    private void createOrUpdateStoreItem(ReferenceItem referenceItem, String storeId, Double originalPrice) {
         Optional<StoreItem> existingStoreItem = storeItemRepository
-                .findByStoreIdAndReferenceItemId(store.getId(), referenceItem.getId());
+                .findByStoreIdAndReferenceItemId(storeId, referenceItem.getId());
         
         if (existingStoreItem.isPresent()) {
-            // Update existing store item prices
             StoreItem storeItem = existingStoreItem.get();
-            if (originalPrice != null) {
-                storeItem.setOriginalPrice(originalPrice);
-            }
-            if (discountPrice != null) {
-                storeItem.setDiscountPrice(discountPrice);
-            }
+            storeItem.setOriginalPrice(originalPrice);
             storeItem.setLastPriceUpdate(Instant.now());
             storeItemRepository.save(storeItem);
         } else {
-            // Create new store item
             StoreItem newStoreItem = StoreItem.builder()
-                    .storeId(store.getId())
+                    .storeId(storeId)
                     .referenceItemId(referenceItem.getId())
                     .name(referenceItem.getName())
                     .nameAr(referenceItem.getNameAr())
                     .images(referenceItem.getImages())
                     .originalPrice(originalPrice)
-                    .discountPrice(discountPrice)
                     .currency("JOD")
                     .lastPriceUpdate(Instant.now())
                     .build();
@@ -275,105 +339,6 @@ public class BulkUploadService {
         }
         // Try Arabic name
         return storeRepository.findByNameArIgnoreCase(name);
-    }
-    
-    /**
-     * Find or create a category by path.
-     * Path format: "Parent.Child.Grandchild" where each segment is a category name.
-     * Creates missing categories as subcategories of the previous segment.
-     * 
-     * @param path Category path (e.g., "Dairy.Milk.Low Fat")
-     * @return The final (deepest) category in the path
-     */
-    private Category findOrCreateCategoryByPath(String path) {
-        String[] segments = path.split("\\.");
-        
-        Category currentCategory = null;
-        
-        for (int i = 0; i < segments.length; i++) {
-            String segmentName = segments[i].trim();
-            if (segmentName.isBlank()) {
-                throw new IllegalArgumentException("Empty category segment in path: " + path);
-            }
-            
-            Optional<Category> foundCategory;
-            
-            if (i == 0) {
-                // First segment: look for top-level category (null parent) or any category
-                foundCategory = findTopLevelCategoryByName(segmentName);
-                if (foundCategory.isEmpty()) {
-                    // Fallback: try to find any category with this name
-                    foundCategory = findCategoryByName(segmentName);
-                }
-            } else {
-                // Subsequent segments: look for child of current category
-                foundCategory = findChildCategoryByName(currentCategory.getId(), segmentName);
-            }
-            
-            if (foundCategory.isPresent()) {
-                currentCategory = foundCategory.get();
-            } else {
-                // Create the category
-                currentCategory = createCategory(segmentName, currentCategory);
-            }
-        }
-        
-        return currentCategory;
-    }
-    
-    private Optional<Category> findTopLevelCategoryByName(String name) {
-        // Try English name first
-        Optional<Category> category = categoryRepository.findByParentCategoryIdIsNullAndNameIgnoreCase(name);
-        if (category.isPresent()) {
-            return category;
-        }
-        // Try Arabic name
-        return categoryRepository.findByParentCategoryIdIsNullAndNameArIgnoreCase(name);
-    }
-    
-    private Optional<Category> findChildCategoryByName(String parentId, String name) {
-        // Try English name first
-        Optional<Category> category = categoryRepository.findByParentCategoryIdAndNameIgnoreCase(parentId, name);
-        if (category.isPresent()) {
-            return category;
-        }
-        // Try Arabic name
-        return categoryRepository.findByParentCategoryIdAndNameArIgnoreCase(parentId, name);
-    }
-    
-    private Optional<Category> findCategoryByName(String name) {
-        // Try English name first
-        Optional<Category> category = categoryRepository.findByNameIgnoreCase(name);
-        if (category.isPresent()) {
-            return category;
-        }
-        // Try Arabic name
-        return categoryRepository.findByNameArIgnoreCase(name);
-    }
-    
-    private Category createCategory(String name, Category parent) {
-        Category newCategory = Category.builder()
-                .name(name)
-                .parentCategoryId(parent != null ? parent.getId() : null)
-                .active(true)
-                .displayOrder(0)
-                .build();
-        
-        Category saved = categoryRepository.save(newCategory);
-        
-        // Update parent's subcategoryIds if parent exists
-        if (parent != null) {
-            List<String> subcategoryIds = parent.getSubcategoryIds();
-            if (subcategoryIds == null) {
-                subcategoryIds = new ArrayList<>();
-            }
-            subcategoryIds.add(saved.getId());
-            parent.setSubcategoryIds(subcategoryIds);
-            categoryRepository.save(parent);
-        }
-        
-        log.info("Created category '{}' under parent '{}'", name, parent != null ? parent.getName() : "(root)");
-        return saved;
     }
     
     private String getStringCellValue(Cell cell) {
