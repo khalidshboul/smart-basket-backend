@@ -1,14 +1,19 @@
 package com.smartbasket.backend.service;
 
+import com.smartbasket.backend.dto.BarcodeSearchResponse;
 import com.smartbasket.backend.dto.CreateReferenceItemRequest;
 import com.smartbasket.backend.dto.ReferenceItemDto;
+import com.smartbasket.backend.dto.StoreItemDto;
 import com.smartbasket.backend.exception.ResourceNotFoundException;
 import com.smartbasket.backend.mapper.ReferenceItemMapper;
 import com.smartbasket.backend.model.Category;
 import com.smartbasket.backend.model.ReferenceItem;
+import com.smartbasket.backend.model.Store;
+import com.smartbasket.backend.model.StoreItem;
 import com.smartbasket.backend.repository.CategoryRepository;
 import com.smartbasket.backend.repository.ReferenceItemRepository;
 import com.smartbasket.backend.repository.StoreItemRepository;
+import com.smartbasket.backend.repository.StoreRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -27,6 +32,7 @@ public class ReferenceItemService {
     private final ReferenceItemRepository referenceItemRepository;
     private final CategoryRepository categoryRepository;
     private final StoreItemRepository storeItemRepository;
+    private final StoreRepository storeRepository;
     private final ReferenceItemMapper referenceItemMapper;
 
     public List<ReferenceItemDto> getAllItems() {
@@ -140,6 +146,7 @@ public class ReferenceItemService {
                     existing.setDescription(request.getDescription());
                     existing.setDescriptionAr(request.getDescriptionAr());
                     existing.setImages(request.getImages() != null ? request.getImages() : existing.getImages());
+                    existing.setBarcode(request.getBarcode());
                     if (request.getAvailableInAllStores() != null) {
                         existing.setAvailableInAllStores(request.getAvailableInAllStores());
                     }
@@ -168,6 +175,74 @@ public class ReferenceItemService {
                     return referenceItemRepository.save(existing);
                 })
                 .map(referenceItemMapper::toDto);
+    }
+    
+    /**
+     * Search for a reference item by barcode and return with all store prices.
+     * This is a combined query that eliminates the need for multiple API calls.
+     */
+    public Optional<BarcodeSearchResponse> searchByBarcode(String barcode) {
+        if (barcode == null || barcode.trim().isEmpty()) {
+            return Optional.empty();
+        }
+        
+        return referenceItemRepository.findByBarcode(barcode.trim())
+                .map(referenceItem -> {
+                    ReferenceItemDto itemDto = referenceItemMapper.toDto(referenceItem);
+                    
+                    // Get all store items for this reference item
+                    List<StoreItemDto> storePrices = storeItemRepository
+                            .findByReferenceItemId(referenceItem.getId())
+                            .stream()
+                            .map(this::toStoreItemDto)
+                            .collect(Collectors.toList());
+                    
+                    // Find cheapest store
+                    String cheapestStore = null;
+                    Double lowestPrice = null;
+                    for (StoreItemDto si : storePrices) {
+                        Double effectivePrice = si.getDiscountPrice() != null ? si.getDiscountPrice() 
+                                : si.getOriginalPrice();
+                        if (effectivePrice != null && (lowestPrice == null || effectivePrice < lowestPrice)) {
+                            lowestPrice = effectivePrice;
+                            cheapestStore = si.getStoreName();
+                        }
+                    }
+                    
+                    return BarcodeSearchResponse.builder()
+                            .item(itemDto)
+                            .storePrices(storePrices)
+                            .storeCount(storePrices.size())
+                            .lowestPrice(lowestPrice)
+                            .cheapestStoreName(cheapestStore)
+                            .build();
+                });
+    }
+    
+    /**
+     * Convert StoreItem entity to DTO with store name
+     */
+    private StoreItemDto toStoreItemDto(StoreItem storeItem) {
+        String storeName = storeItem.getStoreId() != null 
+                ? storeRepository.findById(storeItem.getStoreId())
+                    .map(Store::getName)
+                    .orElse(null)
+                : null;
+
+        return StoreItemDto.builder()
+                .id(storeItem.getId())
+                .storeId(storeItem.getStoreId())
+                .storeName(storeName)
+                .referenceItemId(storeItem.getReferenceItemId())
+                .name(storeItem.getName())
+                .nameAr(storeItem.getNameAr())
+                .brand(storeItem.getBrand())
+                .originalPrice(storeItem.getOriginalPrice())
+                .discountPrice(storeItem.getDiscountPrice())
+                .currency(storeItem.getCurrency())
+                .isPromotion(storeItem.getIsPromotion() != null && storeItem.getIsPromotion())
+                .barcode(storeItem.getBarcode())
+                .build();
     }
     
     private String getCategoryName(String categoryId) {

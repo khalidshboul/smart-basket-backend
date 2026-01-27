@@ -23,6 +23,7 @@ public class CreateReferenceItemRequest {
     private String description;
     private String descriptionAr;
     private List<String> images;
+    private String barcode;
     
     // Store availability (defaults to true if not specified)
     private Boolean availableInAllStores;

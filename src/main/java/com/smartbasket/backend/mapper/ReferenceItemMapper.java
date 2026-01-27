@@ -33,6 +33,7 @@ public class ReferenceItemMapper {
                 .description(entity.getDescription())
                 .descriptionAr(entity.getDescriptionAr())
                 .images(entity.getImages() != null ? entity.getImages() : new ArrayList<>())
+                .barcode(entity.getBarcode())
                 .availableInAllStores(entity.isAvailableInAllStores())
                 .specificStoreIds(entity.getSpecificStoreIds() != null ? entity.getSpecificStoreIds() : new ArrayList<>())
                 .active(entity.isActive())
@@ -50,6 +51,7 @@ public class ReferenceItemMapper {
                 .description(request.getDescription())
                 .descriptionAr(request.getDescriptionAr())
                 .images(request.getImages() != null ? request.getImages() : new ArrayList<>())
+                .barcode(request.getBarcode())
                 .availableInAllStores(request.getAvailableInAllStores() != null ? request.getAvailableInAllStores() : true)
                 .specificStoreIds(request.getSpecificStoreIds() != null ? request.getSpecificStoreIds() : new ArrayList<>())
                 .build();
