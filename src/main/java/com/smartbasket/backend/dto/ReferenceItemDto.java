@@ -21,6 +21,7 @@ public class ReferenceItemDto {
     private String description;
     private String descriptionAr;
     private List<String> images;
+    private String barcode;
     private boolean availableInAllStores;
     private List<String> specificStoreIds;
     private boolean active;

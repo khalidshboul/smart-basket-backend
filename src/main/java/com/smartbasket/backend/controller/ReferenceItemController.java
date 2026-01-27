@@ -1,5 +1,6 @@
 package com.smartbasket.backend.controller;
 
+import com.smartbasket.backend.dto.BarcodeSearchResponse;
 import com.smartbasket.backend.dto.CreateReferenceItemRequest;
 import com.smartbasket.backend.dto.ReferenceItemDto;
 import com.smartbasket.backend.service.ReferenceItemService;
@@ -71,6 +72,17 @@ public class ReferenceItemController {
     @PatchMapping("/{id}/toggle-status")
     public ResponseEntity<ReferenceItemDto> toggleItemStatus(@PathVariable String id) {
         return referenceItemService.toggleStatus(id)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
+    }
+
+    /**
+     * Search for a reference item by barcode.
+     * Returns the reference item along with all store prices in a single response.
+     */
+    @GetMapping("/barcode/{barcode}")
+    public ResponseEntity<BarcodeSearchResponse> getByBarcode(@PathVariable String barcode) {
+        return referenceItemService.searchByBarcode(barcode)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
     }

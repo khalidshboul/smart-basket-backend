@@ -16,5 +16,8 @@ public interface ReferenceItemRepository extends MongoRepository<ReferenceItem, 
     
     // Query items across multiple categories (parent + subcategories)
     List<ReferenceItem> findByCategoryIdIn(List<String> categoryIds);
+    
+    // Search by barcode
+    Optional<ReferenceItem> findByBarcode(String barcode);
 }
 

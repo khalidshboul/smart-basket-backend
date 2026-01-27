@@ -34,6 +34,9 @@ public class ReferenceItem {
     @Builder.Default
     private List<String> images = new ArrayList<>();
     
+    // Barcode for the product (same across all stores)
+    private String barcode;
+    
     // Store availability settings
     @Builder.Default
     private boolean availableInAllStores = true;
