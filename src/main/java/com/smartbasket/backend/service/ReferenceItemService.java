@@ -43,12 +43,29 @@ public class ReferenceItemService {
     // ──────────────────────────────────────────────
 
     /**
-     * Paginated items endpoint. Pre-fetches all categories to avoid N+1.
+     * Paginated items endpoint with support for search and category filtering.
+     * Pre-fetches all categories to avoid N+1.
      */
-    public Page<ReferenceItemDto> getAllItems(Pageable pageable) {
-        Page<ReferenceItem> page = referenceItemRepository.findAll(pageable);
+    public Page<ReferenceItemDto> getAllItems(String query, String categoryId, Pageable pageable) {
+        Page<ReferenceItem> page;
+        
+        if (query != null && !query.trim().isEmpty()) {
+            page = referenceItemRepository.findByNameContainingIgnoreCase(query.trim(), pageable);
+        } else if (categoryId != null && !categoryId.trim().isEmpty()) {
+            page = referenceItemRepository.findByCategoryId(categoryId.trim(), pageable);
+        } else {
+            page = referenceItemRepository.findAll(pageable);
+        }
+        
         List<ReferenceItemDto> dtos = referenceItemMapper.toDtoList(page.getContent());
         return new PageImpl<>(dtos, pageable, page.getTotalElements());
+    }
+
+    /**
+     * Paginated items endpoint. (Kept for backward internal usage if needed)
+     */
+    public Page<ReferenceItemDto> getAllItems(Pageable pageable) {
+        return getAllItems(null, null, pageable);
     }
 
     /**
