@@ -2,8 +2,10 @@ package com.smartbasket.backend.repository;
 
 import com.smartbasket.backend.model.ReferenceItem;
 import org.springframework.data.mongodb.repository.MongoRepository;
+import org.springframework.data.mongodb.repository.Query;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -13,6 +15,10 @@ public interface ReferenceItemRepository extends MongoRepository<ReferenceItem, 
     List<ReferenceItem> findByCategoryId(String categoryId);
     List<ReferenceItem> findByNameContainingIgnoreCase(String name);
     Optional<ReferenceItem> findByNameIgnoreCase(String name);
+    
+    // Bulk fetch by names (case-insensitive) for performance optimization
+    @Query("{ 'name': { $in: ?0 } }")
+    List<ReferenceItem> findByNameIn(Collection<String> names);
     
     // Query items across multiple categories (parent + subcategories)
     List<ReferenceItem> findByCategoryIdIn(List<String> categoryIds);

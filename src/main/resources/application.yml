@@ -11,6 +11,10 @@ spring:
       # MongoDB URI from environment variable (required in production)
       # Example: mongodb+srv://user:password@cluster.mongodb.net/database?retryWrites=true&w=majority
       uri: ${MONGODB_URI:mongodb://localhost:27017/smartbasket}
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
 
 management:
   endpoints:
