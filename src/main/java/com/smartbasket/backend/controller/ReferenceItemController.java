@@ -31,22 +31,22 @@ public class ReferenceItemController {
      */
     @GetMapping
     public ResponseEntity<?> getAllItems(
-            @RequestParam(name = "page", required = false, defaultValue = "0") Integer page,
-            @RequestParam(name = "size", required = false, defaultValue = "25") Integer size,
-            @RequestParam(name = "paginate", defaultValue = "false") boolean paginate) {
+            @RequestParam(name = "page", defaultValue = "0") int page,
+            @RequestParam(name = "size", defaultValue = "20") int size,
+            @RequestParam(name = "query", required = false) String query,
+            @RequestParam(name = "categoryId", required = false) String categoryId,
+            @RequestParam(name = "paginate", defaultValue = "true") boolean paginate) {
 
-        log.info("Get All Items - page: {}, size: {}, paginate: {}", page, size, paginate);
+        log.info("Get Items - page: {}, size: {}, query: {}, categoryId: {}, paginate: {}", 
+                page, size, query, categoryId, paginate);
 
-        // If explicitly asked for pagination OR if page/size params are present
-        if (paginate || (page != null && size != null)) {
-            int pageVal = (page != null) ? page : 0;
-            int sizeVal = (size != null) ? size : 20;
-            Pageable pageable = PageRequest.of(pageVal, sizeVal);
-            Page<ReferenceItemDto> result = referenceItemService.getAllItems(pageable);
+        if (paginate) {
+            Pageable pageable = PageRequest.of(page, size);
+            Page<ReferenceItemDto> result = referenceItemService.getAllItems(query, categoryId, pageable);
             return ResponseEntity.ok(result);
         }
 
-        // Return full list only if paginate=false is explicitly sent
+        // Return full list only if explicitly asked via paginate=false
         return ResponseEntity.ok(referenceItemService.getAllItems());
     }
 
