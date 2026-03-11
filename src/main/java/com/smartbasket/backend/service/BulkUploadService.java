@@ -1,21 +1,22 @@
 package com.smartbasket.backend.service;
 
+import com.smartbasket.backend.dto.BulkUploadParsedData;
+import com.smartbasket.backend.dto.BulkUploadParsedData.ParsedRow;
 import com.smartbasket.backend.dto.BulkUploadResponseDto;
-import com.smartbasket.backend.dto.BulkUploadResponseDto.RowError;
-import com.smartbasket.backend.exception.BulkUploadValidationException;
 import com.smartbasket.backend.exception.ResourceNotFoundException;
 import com.smartbasket.backend.model.Category;
 import com.smartbasket.backend.model.ReferenceItem;
-import com.smartbasket.backend.model.Store;
 import com.smartbasket.backend.model.StoreItem;
 import com.smartbasket.backend.repository.CategoryRepository;
 import com.smartbasket.backend.repository.ReferenceItemRepository;
 import com.smartbasket.backend.repository.StoreItemRepository;
-import com.smartbasket.backend.repository.StoreRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.poi.ss.usermodel.*;
-import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import org.springframework.data.mongodb.core.BulkOperations;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -23,367 +24,217 @@ import org.springframework.web.multipart.MultipartFile;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.*;
+import java.util.stream.Collectors;
 
+/**
+ * Orchestrates the bulk upload workflow: parse → persist.
+ * <p>
+ * Excel parsing is delegated to {@link BulkUploadExcelParser}.
+ * Persistence uses batch operations for optimal performance.
+ */
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class BulkUploadService {
-    
+
     private final CategoryRepository categoryRepository;
-    private final StoreRepository storeRepository;
     private final ReferenceItemRepository referenceItemRepository;
     private final StoreItemRepository storeItemRepository;
-    
-    // Fixed column indices (0-based)
-    private static final int COL_NAME = 0;
-    private static final int COL_NAME_AR = 1;
-    private static final int COL_DESCRIPTION = 2;
-    private static final int COL_DESCRIPTION_AR = 3;
-    private static final int COL_IMAGE1 = 4;
-    private static final int COL_IMAGE2 = 5;
-    private static final int COL_IMAGE3 = 6;
-    private static final int FIRST_STORE_COL = 7;
-    
+    private final MongoTemplate mongoTemplate;
+    private final BulkUploadExcelParser excelParser;
+
     /**
-     * Internal DTO to hold parsed row data before validation
+     * Processes a bulk upload Excel file for the given category.
+     *
+     * @param file       the uploaded .xlsx file
+     * @param categoryId the target category ID
+     * @return summary of the upload result
      */
-    private record ParsedRow(
-            int rowNumber,
-            String name,
-            String nameAr,
-            String description,
-            String descriptionAr,
-            List<String> images,
-            Map<String, Double> storePrices // storeId -> originalPrice
-    ) {}
-    
     @Transactional(rollbackFor = Exception.class)
     public BulkUploadResponseDto processExcelFile(MultipartFile file, String categoryId) throws IOException {
-        // Phase 1: Validate category exists
         Category category = categoryRepository.findById(categoryId)
                 .orElseThrow(() -> new ResourceNotFoundException("Category not found: " + categoryId));
-        
-        try (Workbook workbook = new XSSFWorkbook(file.getInputStream())) {
-            Sheet sheet = workbook.getSheetAt(0);
-            
-            // Phase 2: Parse header row and validate stores
-            Row headerRow = sheet.getRow(0);
-            if (headerRow == null) {
-                throw new BulkUploadValidationException(
-                        0, categoryId, category.getName(),
-                        List.of(RowError.builder()
-                                .row(1)
-                                .errorType(BulkUploadResponseDto.ERROR_VALIDATION)
-                                .message("Excel file is empty or missing header row")
-                                .build())
-                );
-            }
-            
-            // Extract store names from header (columns 7+)
-            Map<Integer, Store> storeColumns = new LinkedHashMap<>();
-            List<String> invalidStores = new ArrayList<>();
-            List<RowError> errors = new ArrayList<>();
-            
-            for (int col = FIRST_STORE_COL; col < headerRow.getLastCellNum(); col++) {
-                Cell cell = headerRow.getCell(col);
-                String storeName = getStringCellValue(cell);
-                if (storeName != null && !storeName.isBlank()) {
-                    Optional<Store> storeOpt = findStoreByName(storeName);
-                    if (storeOpt.isPresent()) {
-                        storeColumns.put(col, storeOpt.get());
-                    } else {
-                        invalidStores.add(storeName);
-                        errors.add(RowError.builder()
-                                .row(1)
-                                .errorType(BulkUploadResponseDto.ERROR_STORE)
-                                .field(storeName)
-                                .message("Store not found: " + storeName)
-                                .build());
-                    }
-                }
-            }
-            
-            // Fail if any stores are invalid
-            if (!invalidStores.isEmpty()) {
-                throw new BulkUploadValidationException(0, categoryId, category.getName(), errors, invalidStores);
-            }
-            
-            if (storeColumns.isEmpty()) {
-                throw new BulkUploadValidationException(
-                        0, categoryId, category.getName(),
-                        List.of(RowError.builder()
-                                .row(1)
-                                .errorType(BulkUploadResponseDto.ERROR_VALIDATION)
-                                .message("No valid store columns found in header row (columns H onwards)")
-                                .build())
-                );
-            }
-            
-            // Phase 3: Parse and validate all rows
-            List<ParsedRow> parsedRows = new ArrayList<>();
-            int totalRows = 0;
-            
-            for (int rowNum = 1; rowNum <= sheet.getLastRowNum(); rowNum++) {
-                Row row = sheet.getRow(rowNum);
-                if (row == null || isRowEmpty(row)) {
-                    continue;
-                }
-                
-                totalRows++;
-                int excelRowNum = rowNum + 1; // 1-indexed for user display
-                
-                // Parse row data
-                String name = getStringCellValue(row.getCell(COL_NAME));
-                String nameAr = getStringCellValue(row.getCell(COL_NAME_AR));
-                String description = getStringCellValue(row.getCell(COL_DESCRIPTION));
-                String descriptionAr = getStringCellValue(row.getCell(COL_DESCRIPTION_AR));
-                String image1 = getStringCellValue(row.getCell(COL_IMAGE1));
-                String image2 = getStringCellValue(row.getCell(COL_IMAGE2));
-                String image3 = getStringCellValue(row.getCell(COL_IMAGE3));
-                
-                // Validate required fields
-                if (name == null || name.isBlank()) {
-                    errors.add(RowError.builder()
-                            .row(excelRowNum)
-                            .itemName(name)
-                            .errorType(BulkUploadResponseDto.ERROR_VALIDATION)
-                            .field("name")
-                            .message("Item name is required")
-                            .build());
-                    continue;
-                }
-                
-                // Build images list
-                List<String> images = new ArrayList<>();
-                if (image1 != null && !image1.isBlank()) images.add(image1);
-                if (image2 != null && !image2.isBlank()) images.add(image2);
-                if (image3 != null && !image3.isBlank()) images.add(image3);
-                
-                // Parse store prices
-                Map<String, Double> storePrices = new HashMap<>();
-                boolean hasPriceError = false;
-                
-                for (Map.Entry<Integer, Store> entry : storeColumns.entrySet()) {
-                    Cell priceCell = row.getCell(entry.getKey());
-                    String rawValue = getStringCellValue(priceCell);
-                    
-                    if (rawValue != null && !rawValue.isBlank()) {
-                        Double price = getNumericCellValue(priceCell);
-                        if (price == null) {
-                            errors.add(RowError.builder()
-                                    .row(excelRowNum)
-                                    .itemName(name)
-                                    .errorType(BulkUploadResponseDto.ERROR_PRICE)
-                                    .field(entry.getValue().getName())
-                                    .message("Invalid price value: '" + rawValue + "'")
-                                    .build());
-                            hasPriceError = true;
-                        } else if (price > 0) {
-                            storePrices.put(entry.getValue().getId(), price);
-                        }
-                    }
-                }
-                
-                if (hasPriceError) {
-                    continue;
-                }
-                
-                // At least one store price is required
-                if (storePrices.isEmpty()) {
-                    errors.add(RowError.builder()
-                            .row(excelRowNum)
-                            .itemName(name)
-                            .errorType(BulkUploadResponseDto.ERROR_VALIDATION)
-                            .message("At least one store price is required")
-                            .build());
-                    continue;
-                }
-                
-                parsedRows.add(new ParsedRow(excelRowNum, name, nameAr, description, descriptionAr, images, storePrices));
-            }
-            
-            // Phase 4: Fail if any validation errors
-            if (!errors.isEmpty()) {
-                throw new BulkUploadValidationException(totalRows, categoryId, category.getName(), errors);
-            }
-            
-            if (parsedRows.isEmpty()) {
-                throw new BulkUploadValidationException(
-                        0, categoryId, category.getName(),
-                        List.of(RowError.builder()
-                                .row(0)
-                                .errorType(BulkUploadResponseDto.ERROR_VALIDATION)
-                                .message("No valid data rows found in the Excel file")
-                                .build())
-                );
-            }
-            
-            // Phase 5: Write all data (inside transaction)
-            int successCount = 0;
-            
-            for (ParsedRow parsedRow : parsedRows) {
-                // Create or update ReferenceItem
-                ReferenceItem referenceItem = createOrUpdateReferenceItem(
-                        parsedRow.name(),
-                        parsedRow.nameAr(),
-                        category,
-                        parsedRow.description(),
-                        parsedRow.descriptionAr(),
-                        parsedRow.images(),
-                        new ArrayList<>(parsedRow.storePrices().keySet())
-                );
-                
-                // Create StoreItems for each store price
-                for (Map.Entry<String, Double> priceEntry : parsedRow.storePrices().entrySet()) {
-                    createOrUpdateStoreItem(referenceItem, priceEntry.getKey(), priceEntry.getValue());
-                }
-                
-                successCount++;
-            }
-            
-            log.info("Bulk upload completed: {} items processed for category '{}'", successCount, category.getName());
-            
-            return BulkUploadResponseDto.builder()
-                    .success(true)
-                    .totalRows(totalRows)
-                    .successCount(successCount)
-                    .errorCount(0)
-                    .categoryId(categoryId)
-                    .categoryName(category.getName())
-                    .build();
-        }
-    }
-    
-    private ReferenceItem createOrUpdateReferenceItem(
-            String name, String nameAr, Category category,
-            String description, String descriptionAr, List<String> images, List<String> storeIds
-    ) {
-        // Check if item already exists by name
-        Optional<ReferenceItem> existingItem = referenceItemRepository.findByNameIgnoreCase(name);
-        
-        if (existingItem.isPresent()) {
-            ReferenceItem item = existingItem.get();
-            // Update fields if they were empty
-            if ((item.getNameAr() == null || item.getNameAr().isBlank()) && nameAr != null) {
-                item.setNameAr(nameAr);
-            }
-            if ((item.getDescription() == null || item.getDescription().isBlank()) && description != null) {
-                item.setDescription(description);
-            }
-            if ((item.getDescriptionAr() == null || item.getDescriptionAr().isBlank()) && descriptionAr != null) {
-                item.setDescriptionAr(descriptionAr);
-            }
-            if ((item.getImages() == null || item.getImages().isEmpty()) && !images.isEmpty()) {
-                item.setImages(images);
-            }
-            // Add stores to specificStoreIds if not already present
-            List<String> currentStoreIds = item.getSpecificStoreIds();
-            if (currentStoreIds == null) {
-                currentStoreIds = new ArrayList<>();
-            }
-            for (String storeId : storeIds) {
-                if (!currentStoreIds.contains(storeId)) {
-                    currentStoreIds.add(storeId);
-                }
-            }
-            item.setSpecificStoreIds(currentStoreIds);
-            return referenceItemRepository.save(item);
-        }
-        
-        // Create new reference item
-        ReferenceItem newItem = ReferenceItem.builder()
-                .name(name)
-                .nameAr(nameAr)
-                .categoryId(category.getId())
-                .category(category.getName())
-                .description(description)
-                .descriptionAr(descriptionAr)
-                .images(images)
-                .active(true)
-                .availableInAllStores(false)
-                .specificStoreIds(storeIds)
+
+        BulkUploadParsedData parsedData = excelParser.parse(file, categoryId, category.getName());
+
+        int successCount = persistBatch(parsedData.getRows(), category);
+
+        log.info("Bulk upload completed: {} items processed for category '{}'", successCount, category.getName());
+
+        return BulkUploadResponseDto.builder()
+                .success(true)
+                .totalRows(parsedData.getTotalRows())
+                .successCount(successCount)
+                .errorCount(0)
+                .categoryId(categoryId)
+                .categoryName(category.getName())
                 .build();
-        
-        return referenceItemRepository.save(newItem);
     }
-    
-    private void createOrUpdateStoreItem(ReferenceItem referenceItem, String storeId, Double originalPrice) {
-        Optional<StoreItem> existingStoreItem = storeItemRepository
-                .findByStoreIdAndReferenceItemId(storeId, referenceItem.getId());
-        
-        if (existingStoreItem.isPresent()) {
-            StoreItem storeItem = existingStoreItem.get();
-            storeItem.setOriginalPrice(originalPrice);
-            storeItem.setLastPriceUpdate(Instant.now());
-            storeItemRepository.save(storeItem);
-        } else {
-            StoreItem newStoreItem = StoreItem.builder()
-                    .storeId(storeId)
-                    .referenceItemId(referenceItem.getId())
-                    .name(referenceItem.getName())
-                    .nameAr(referenceItem.getNameAr())
-                    .images(referenceItem.getImages())
-                    .originalPrice(originalPrice)
-                    .currency("JOD")
-                    .lastPriceUpdate(Instant.now())
-                    .build();
-            storeItemRepository.save(newStoreItem);
-        }
+
+    // ──────────────────────────────────────────────
+    // Batch Persistence
+    // ──────────────────────────────────────────────
+
+    /**
+     * Persists all parsed rows using batch operations:
+     * <ol>
+     *   <li>Pre-fetch existing {@link ReferenceItem}s by name (single query)</li>
+     *   <li>Batch-save all {@link ReferenceItem}s (single {@code saveAll} call)</li>
+     *   <li>Bulk-upsert all {@link StoreItem}s via {@link MongoTemplate} (single write)</li>
+     * </ol>
+     */
+    private int persistBatch(List<ParsedRow> rows, Category category) {
+        Map<String, ReferenceItem> existingItemsByName = prefetchReferenceItems(rows);
+
+        List<ReferenceItem> itemsToSave = buildReferenceItems(rows, category, existingItemsByName);
+        List<ReferenceItem> savedItems = referenceItemRepository.saveAll(itemsToSave);
+
+        Map<String, ReferenceItem> savedItemsByName = indexByLowerCaseName(savedItems);
+        bulkUpsertStoreItems(rows, savedItemsByName);
+
+        return rows.size();
     }
-    
-    private Optional<Store> findStoreByName(String name) {
-        // Try English name first
-        Optional<Store> store = storeRepository.findByNameIgnoreCase(name);
-        if (store.isPresent()) {
-            return store;
-        }
-        // Try Arabic name
-        return storeRepository.findByNameArIgnoreCase(name);
+
+    // ──────────────────────────────────────────────
+    // ReferenceItem Handling
+    // ──────────────────────────────────────────────
+
+    private Map<String, ReferenceItem> prefetchReferenceItems(List<ParsedRow> rows) {
+        List<String> names = rows.stream().map(ParsedRow::name).toList();
+        return referenceItemRepository.findByNameIn(names).stream()
+                .collect(Collectors.toMap(
+                        item -> item.getName().toLowerCase(),
+                        item -> item,
+                        (existing, duplicate) -> existing
+                ));
     }
-    
-    private String getStringCellValue(Cell cell) {
-        if (cell == null) {
-            return null;
-        }
-        return switch (cell.getCellType()) {
-            case STRING -> cell.getStringCellValue().trim();
-            case NUMERIC -> String.valueOf(cell.getNumericCellValue());
-            case BOOLEAN -> String.valueOf(cell.getBooleanCellValue());
-            default -> null;
-        };
-    }
-    
-    private Double getNumericCellValue(Cell cell) {
-        if (cell == null) {
-            return null;
-        }
-        return switch (cell.getCellType()) {
-            case NUMERIC -> cell.getNumericCellValue();
-            case STRING -> {
-                String value = cell.getStringCellValue().trim();
-                if (value.isBlank()) {
-                    yield null;
-                }
-                try {
-                    yield Double.parseDouble(value);
-                } catch (NumberFormatException e) {
-                    yield null;
-                }
+
+    private List<ReferenceItem> buildReferenceItems(
+            List<ParsedRow> rows, Category category,
+            Map<String, ReferenceItem> existingItemsByName) {
+
+        List<ReferenceItem> itemsToSave = new ArrayList<>();
+
+        for (ParsedRow row : rows) {
+            String key = row.name().toLowerCase();
+            ReferenceItem item = existingItemsByName.get(key);
+
+            if (item != null) {
+                mergeFields(item, row, category);
+                mergeStoreIds(item, row.storePrices().keySet());
+            } else {
+                item = ReferenceItem.builder()
+                        .name(row.name())
+                        .nameAr(row.nameAr())
+                        .categoryId(category.getId())
+                        .category(category.getName())
+                        .description(row.description())
+                        .descriptionAr(row.descriptionAr())
+                        .images(row.images())
+                        .active(true)
+                        .availableInAllStores(false)
+                        .specificStoreIds(new ArrayList<>(row.storePrices().keySet()))
+                        .build();
+                existingItemsByName.put(key, item);
             }
-            default -> null;
-        };
+
+            itemsToSave.add(item);
+        }
+        return itemsToSave;
     }
-    
-    private boolean isRowEmpty(Row row) {
-        for (int c = row.getFirstCellNum(); c < row.getLastCellNum(); c++) {
-            Cell cell = row.getCell(c);
-            if (cell != null && cell.getCellType() != CellType.BLANK) {
-                String value = getStringCellValue(cell);
-                if (value != null && !value.isBlank()) {
-                    return false;
-                }
+
+    /**
+     * Updates an existing item: re-categorizes it to the upload's category
+     * and fills in any blank fields from the parsed row.
+     */
+    private void mergeFields(ReferenceItem item, ParsedRow row, Category category) {
+        item.setCategoryId(category.getId());
+        item.setCategory(category.getName());
+        setIfBlank(item.getNameAr(), row.nameAr(), item::setNameAr);
+        setIfBlank(item.getDescription(), row.description(), item::setDescription);
+        setIfBlank(item.getDescriptionAr(), row.descriptionAr(), item::setDescriptionAr);
+        if ((item.getImages() == null || item.getImages().isEmpty()) && !row.images().isEmpty()) {
+            item.setImages(row.images());
+        }
+    }
+
+    private void mergeStoreIds(ReferenceItem item, Set<String> newStoreIds) {
+        List<String> current = item.getSpecificStoreIds();
+        if (current == null) {
+            current = new ArrayList<>();
+        }
+        for (String storeId : newStoreIds) {
+            if (!current.contains(storeId)) {
+                current.add(storeId);
             }
         }
-        return true;
+        item.setSpecificStoreIds(current);
+    }
+
+    // ──────────────────────────────────────────────
+    // StoreItem Bulk Upsert
+    // ──────────────────────────────────────────────
+
+    private void bulkUpsertStoreItems(List<ParsedRow> rows, Map<String, ReferenceItem> savedItemsByName) {
+        BulkOperations bulkOps = mongoTemplate.bulkOps(BulkOperations.BulkMode.UNORDERED, StoreItem.class);
+        int upsertCount = 0;
+
+        for (ParsedRow row : rows) {
+            ReferenceItem savedItem = savedItemsByName.get(row.name().toLowerCase());
+            if (savedItem == null) {
+                continue;
+            }
+
+            for (Map.Entry<String, Double> priceEntry : row.storePrices().entrySet()) {
+                bulkOps.upsert(
+                        storeItemMatchQuery(priceEntry.getKey(), savedItem.getId()),
+                        storeItemUpdate(priceEntry.getKey(), priceEntry.getValue(), savedItem)
+                );
+                upsertCount++;
+            }
+        }
+
+        if (upsertCount > 0) {
+            bulkOps.execute();
+        }
+    }
+
+    private Query storeItemMatchQuery(String storeId, String referenceItemId) {
+        return new Query(Criteria.where("storeId").is(storeId)
+                .and("referenceItemId").is(referenceItemId));
+    }
+
+    private Update storeItemUpdate(String storeId, Double originalPrice, ReferenceItem item) {
+        return new Update()
+                .set("originalPrice", originalPrice)
+                .set("lastPriceUpdate", Instant.now())
+                .setOnInsert("storeId", storeId)
+                .setOnInsert("referenceItemId", item.getId())
+                .setOnInsert("name", item.getName())
+                .setOnInsert("nameAr", item.getNameAr())
+                .setOnInsert("images", item.getImages())
+                .setOnInsert("currency", "JOD");
+    }
+
+    // ──────────────────────────────────────────────
+    // Utilities
+    // ──────────────────────────────────────────────
+
+    private Map<String, ReferenceItem> indexByLowerCaseName(List<ReferenceItem> items) {
+        return items.stream()
+                .collect(Collectors.toMap(
+                        item -> item.getName().toLowerCase(),
+                        item -> item,
+                        (existing, duplicate) -> duplicate
+                ));
+    }
+
+    /**
+     * Sets a value via the setter only if the current value is blank/null and the new value is non-null.
+     */
+    private void setIfBlank(String currentValue, String newValue, java.util.function.Consumer<String> setter) {
+        if ((currentValue == null || currentValue.isBlank()) && newValue != null) {
+            setter.accept(newValue);
+        }
     }
 }
